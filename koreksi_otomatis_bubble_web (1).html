@@ -1,0 +1,203 @@
+<!--
+KOREKSI OTOMATIS (Versi silang di lingkaran)
+- Deteksi tanda silang / coretan di lingkaran
+- Jika ada lebih dari satu jawaban dalam 1 soal → dihitung benar asalkan salah satunya cocok dengan kunci
+-->
+
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Koreksi Otomatis - Deteksi Silang</title>
+  <style>
+    body{font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial;margin:0;padding:16px;background:#f7f7f8}
+    .container{max-width:1000px;margin:0 auto}
+    h1{font-size:20px;margin:6px 0}
+    .row{display:flex;gap:12px}
+    .col{flex:1}
+    textarea{width:100%;height:120px}
+    video, canvas{width:100%;border-radius:8px;background:#000}
+    button{padding:8px 12px;border-radius:8px;border:0;background:#1f7ed6;color:white;cursor:pointer}
+    .muted{color:#666;font-size:13px}
+    pre{background:#fff;padding:12px;border-radius:8px;overflow:auto}
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Koreksi Otomatis — Versi Silang di Lingkaran</h1>
+    <p class="muted">Isi kunci (contoh: <code>1:A,2:C,3:B</code>). Foto lembar jawaban dengan tanda silang (✖) di lingkaran.</p>
+
+    <div class="row">
+      <div class="col">
+        <label>Kunci Jawaban:</label>
+        <textarea id="answerKey" placeholder="1:A,2:B,3:C,...">1:A,2:B,3:C,4:D,5:A</textarea>
+
+        <div style="margin-top:8px">
+          <button id="openCam">Buka Kamera</button>
+          <button id="takePhoto">Ambil Foto</button>
+          <input id="file" type="file" accept="image/*" style="margin-left:8px" />
+          <button id="process">Proses</button>
+        </div>
+
+        <div style="margin-top:8px">
+          <label>Video (kamera):</label>
+          <video id="video" autoplay playsinline></video>
+          <canvas id="capture" style="display:none"></canvas>
+        </div>
+
+        <div style="margin-top:8px">
+          <label>Gambar yang diproses:</label>
+          <canvas id="work" width="640" height="480"></canvas>
+        </div>
+      </div>
+
+      <div class="col">
+        <h2>Hasil</h2>
+        <div id="result">
+          <p class="muted">Belum diproses.</p>
+        </div>
+        <h3>Log</h3>
+        <pre id="log">Ready.</pre>
+      </div>
+    </div>
+
+    <p class="muted" style="margin-top:12px">Aturan: jika ada beberapa silang dalam satu soal, dianggap benar jika salah satunya sesuai kunci.</p>
+  </div>
+
+<script async src="https://docs.opencv.org/4.x/opencv.js" onload="onOpenCvReady();"></script>
+<script>
+let video = document.getElementById('video');
+let capture = document.getElementById('capture');
+let work = document.getElementById('work');
+let ctxWork = work.getContext('2d');
+let stream=null;
+let lastImage=null;
+
+const logEl = document.getElementById('log');
+function log(t){ console.log(t); logEl.textContent = (new Date()).toLocaleTimeString() + ' - ' + t + '\n' + logEl.textContent; }
+
+document.getElementById('openCam').addEventListener('click', async ()=>{
+  try{
+    stream = await navigator.mediaDevices.getUserMedia({video:{facingMode:'environment'}, audio:false});
+    video.srcObject = stream;
+    log('Kamera dibuka');
+  }catch(e){ alert('Gagal membuka kamera: '+e.message); }
+});
+
+document.getElementById('takePhoto').addEventListener('click', ()=>{
+  if(!video.srcObject) return alert('Buka kamera dulu.');
+  capture.width = video.videoWidth; capture.height = video.videoHeight;
+  let c = capture.getContext('2d');
+  c.drawImage(video,0,0,capture.width,capture.height);
+  lastImage = capture.toDataURL('image/jpeg');
+  drawToWork(lastImage);
+  log('Foto diambil');
+});
+
+document.getElementById('file').addEventListener('change', (ev)=>{
+  let f = ev.target.files[0];
+  if(!f) return;
+  let reader = new FileReader();
+  reader.onload = ()=>{ lastImage = reader.result; drawToWork(lastImage); log('Gambar diunggah'); }
+  reader.readAsDataURL(f);
+});
+
+function drawToWork(dataUrl){
+  let img = new Image();
+  img.onload = ()=>{ work.width = img.width; work.height = img.height; ctxWork.drawImage(img,0,0); }
+  img.src = dataUrl;
+}
+
+function parseKey(text){
+  let out={};
+  text.replace(/\s+/g,'').split(',').forEach(pair=>{
+    if(!pair) return;
+    let m=pair.split(':');
+    if(m.length==2){ out[parseInt(m[0],10)] = m[1].toUpperCase(); }
+  });
+  return out;
+}
+
+async function onProcess(){
+  if(!lastImage) return alert('Ambil foto atau unggah gambar terlebih dulu.');
+  if(typeof cv === 'undefined') return alert('OpenCV belum siap.');
+
+  log('Mulai pemrosesan...');
+  let img = new Image(); img.src = lastImage; await new Promise(r=>img.onload=r);
+  let mat = cv.imread(img);
+  let gray = new cv.Mat(); cv.cvtColor(mat, gray, cv.COLOR_RGBA2GRAY, 0);
+  let blurred = new cv.Mat(); cv.GaussianBlur(gray, blurred, new cv.Size(5,5), 0);
+  let th = new cv.Mat(); cv.adaptiveThreshold(blurred, th, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY_INV, 35, 10);
+
+  let circles = new cv.Mat();
+  try{
+    cv.HoughCircles(blurred, circles, cv.HOUGH_GRADIENT, 1, 20, 100, 20, 8, 40);
+  }catch(e){ log('Hough error: '+e); }
+
+  let output = mat.clone();
+  let hits = [];
+  for(let i=0;i<circles.cols;i++){
+    let x = circles.data32F[i*3];
+    let y = circles.data32F[i*3+1];
+    let r = circles.data32F[i*3+2];
+    cv.circle(output, new cv.Point(x,y), r, [255,0,0,255], 2);
+    hits.push({x,y,r});
+  }
+
+  hits.sort((a,b)=> (a.y - b.y) || (a.x - b.x));
+  let rows = [];
+  let rowTol = 15;
+  hits.forEach(h=>{
+    let placed=false;
+    for(let row of rows){ if(Math.abs(row.y - h.y) < rowTol){ row.items.push(h); placed=true; break; } }
+    if(!placed) rows.push({y:h.y, items:[h]});
+  });
+  rows.forEach(r=> r.items.sort((a,b)=>a.x-b.x));
+
+  let letters = ['A','B','C','D','E'];
+  let detectedAnswers = {};
+  rows.forEach((r, idx)=>{
+    let chosen=[];
+    r.items.forEach((it, j)=>{
+      let cx = Math.round(it.x), cy=Math.round(it.y), rr=Math.round(it.r*0.6);
+      let x0=Math.max(0,cx-rr), y0=Math.max(0,cy-rr), w=Math.min(th.cols-x0, rr*2), h=Math.min(th.rows-y0, rr*2);
+      if(w<=0||h<=0) return;
+      let roi = th.roi(new cv.Rect(x0,y0,w,h));
+      let nonZero = cv.countNonZero(roi);
+      roi.delete();
+      if(nonZero > 30){ // threshold piksel gelap
+        chosen.push(letters[j]);
+      }
+    });
+    if(chosen.length>0) detectedAnswers[idx+1] = chosen;
+  });
+
+  cv.imshow('work', output);
+
+  let key = parseKey(document.getElementById('answerKey').value);
+  let total = Object.keys(key).length;
+  let correct = 0; let details=[];
+  for(let q in key){
+    let qn = parseInt(q,10);
+    let detected = detectedAnswers[qn] || [];
+    let ok = detected.includes(key[qn]);
+    if(ok) correct++;
+    details.push({q:qn, key:key[qn], detected: detected, ok});
+  }
+
+  let resultEl = document.getElementById('result');
+  let percent = total? Math.round(correct/total*100):0;
+  resultEl.innerHTML = `<p><strong>Nilai: ${correct}/${total} (${percent}%)</strong></p>` +
+                       `<details><summary>Detail per soal</summary><pre>${JSON.stringify(details,null,2)}</pre></details>`;
+
+  mat.delete(); gray.delete(); blurred.delete(); th.delete(); circles.delete(); output.delete();
+  log('Selesai. Correct='+correct+'/'+total);
+}
+
+function onOpenCvReady(){ log('OpenCV siap.'); }
+
+document.getElementById('process').addEventListener('click', onProcess);
+</script>
+</body>
+</html>
